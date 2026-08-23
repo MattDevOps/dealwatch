@@ -1,0 +1,9 @@
+{
+  "_comment": "Overrides on top of DEFAULT_CONFIG in dealwatch.py. Edit freely.",
+  "target_price_gpu": 2200,
+  "target_price_desktop": 3800,
+  "hard_price_filter": false,
+  "ntfy_topic": "",
+  "desktop_notify": true,
+  "auto_open_hot": false
+}
