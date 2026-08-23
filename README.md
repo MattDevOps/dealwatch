@@ -67,6 +67,14 @@ priority so they break through Do Not Disturb.
 `--test-alert` prints which channels actually fired, so a misconfigured one is
 visible immediately rather than the first time a deal shows up.
 
+## Staying honest about silence
+
+No alerts can mean "no 5090s posted" or "it died on Tuesday", and those look
+identical from your phone. A second timer runs `--watchdog` hourly: it messages
+you if no poll has succeeded in 30 minutes (at most one warning an hour), and
+otherwise confirms it is alive once a day with a poll count. Every successful
+poll stamps `state/heartbeat.json`.
+
 ## How it works
 
 - Polls `https://www.reddit.com/r/buildapcsales/new/.rss` (the `.json` endpoint
@@ -100,8 +108,10 @@ Anything in `config.json` overrides `DEFAULT_CONFIG` in `dealwatch.py`.
 | `exclude` | laptop, mobile, handheld | kills the alert outright |
 | `deny_flairs` | monitor, psu, cooler, … | flairs that never hold the deal |
 | `bonus` | 9950X3D, 9900X3D, 64GB, FE | scored and shown as tags in the alert |
-| `target_price_gpu` | 2200 | at or under this, a GPU is flagged HOT |
-| `target_price_desktop` | 3800 | same for a prebuilt |
+| `target_price_gpu` | 3500 | at or under this, a GPU is flagged HOT |
+| `target_price_desktop` | 3500 | same for a prebuilt |
+| `stale_minutes` | 30 | watchdog warns if polling stops for this long |
+| `heartbeat_hours` | 24 | how often the watchdog confirms it is alive |
 | `hard_price_filter` | `false` | `true` = drop posts priced above target |
 | `auto_open_hot` | `false` | `true` = open hot deals in the browser |
 

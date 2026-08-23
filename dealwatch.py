@@ -54,9 +54,10 @@ DEFAULT_CONFIG = {
         {"label": "64GB", "pattern": r"\b64\s*gb\b", "points": 2},
         {"label": "FE", "pattern": r"\bfounders\b", "points": 1},
     ],
-    # Price at or under this is flagged as a hot deal (in the alert title).
-    "target_price_gpu": 2200,
-    "target_price_desktop": 3800,
+    # At or under this, the alert is marked HOT and pushed at urgent priority.
+    # A 5090 in anything under $3.5k is worth interrupting for.
+    "target_price_gpu": 3500,
+    "target_price_desktop": 3500,
     # False = alert on every 5090 regardless of price (missing a deal costs
     # more than an extra ping). True = only alert under the target price.
     "hard_price_filter": False,
@@ -68,6 +69,10 @@ DEFAULT_CONFIG = {
     "telegram_env_files": ["~/.config/dealwatch.env", "~/.config/daytrader.env"],
     "desktop_notify": True,
     "auto_open_hot": False,
+    # Watchdog: warn if polling stops, and prove it is alive once a day, so
+    # silence means "no 5090s posted" rather than "it died last Tuesday".
+    "stale_minutes": 30,
+    "heartbeat_hours": 24,
 }
 
 
@@ -85,6 +90,76 @@ def load_config(path: Path) -> dict:
             for k, v in json.loads(layer.read_text()).items():
                 cfg[k] = v
     return cfg
+
+
+def load_beat(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError, FileNotFoundError):
+        return {}
+
+
+def save_beat(path: Path, beat: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(beat))
+    tmp.replace(path)
+
+
+def record_poll(path: Path, scanned: int, hits: int) -> None:
+    """Stamp a successful poll. The watchdog reads this."""
+    beat = load_beat(path)
+    beat["last_ok"] = time.time()
+    beat["polls"] = beat.get("polls", 0) + 1
+    beat["hits"] = beat.get("hits", 0) + hits
+    beat["scanned"] = scanned
+    save_beat(path, beat)
+
+
+def watchdog(cfg: dict, beat_path: Path) -> int:
+    """Report a stopped poller, and confirm a working one once a day.
+
+    Runs from its own timer so it still speaks up when the poller itself is
+    the thing that is broken.
+    """
+    beat = load_beat(beat_path)
+    now = time.time()
+    last_ok = beat.get("last_ok", 0)
+    stale_after = float(cfg.get("stale_minutes", 30)) * 60
+
+    if not last_ok:
+        print("no successful poll recorded yet")
+        return 0
+
+    quiet = now - last_ok
+    if quiet > stale_after:
+        mins = int(quiet // 60)
+        last_warn = beat.get("last_warn", 0)
+        if now - last_warn > 3600:  # at most one warning an hour
+            notify_telegram(
+                cfg, "dealwatch has stopped polling",
+                f"No successful poll for {mins} minutes "
+                f"(expected one every few minutes).\n"
+                f"Check: systemctl --user status dealwatch.timer")
+            beat["last_warn"] = now
+            save_beat(beat_path, beat)
+        print(f"STALE: last successful poll {mins} minutes ago")
+        return 1
+
+    every = float(cfg.get("heartbeat_hours", 24)) * 3600
+    if every > 0 and now - beat.get("last_beat", 0) > every:
+        hours = int((now - beat.get("last_beat", now - every)) // 3600)
+        sent = notify_telegram(
+            cfg, "dealwatch is alive",
+            f"{beat.get('polls', 0)} polls in the last {hours}h, "
+            f"{beat.get('hits', 0)} matching post(s). "
+            f"Watching r/{cfg['subreddit']} for 5090s.")
+        beat.update(last_beat=now, polls=0, hits=0)
+        save_beat(beat_path, beat)
+        print("heartbeat sent" if sent else "heartbeat skipped: no telegram channel")
+    else:
+        print(f"ok: last poll {int(quiet // 60)}m ago")
+    return 0
 
 
 def validate_config(cfg: dict) -> None:
@@ -585,6 +660,8 @@ def run_once(cfg: dict, state_path: Path, log_path: Path,
     if errors:
         raise RuntimeError(f"{len(errors)} post(s) could not be evaluated: "
                            + "; ".join(errors[:3]))
+    if not dry:
+        record_poll(state_path.with_name("heartbeat.json"), len(posts), hits)
     return hits
 
 
@@ -598,6 +675,8 @@ def main() -> int:
     ap.add_argument("--seed", action="store_true", help="mark current posts seen, no alerts")
     ap.add_argument("--dry-run", action="store_true", help="show matches, change nothing")
     ap.add_argument("--test-alert", action="store_true", help="fire a fake alert end to end")
+    ap.add_argument("--watchdog", action="store_true",
+                    help="warn over Telegram if polling has stopped; daily heartbeat")
     ap.add_argument("--setup-ntfy", action="store_true",
                     help="turn on phone push: make a private ntfy topic and test it")
     args = ap.parse_args()
@@ -609,6 +688,9 @@ def main() -> int:
         print(f"[error] {args.config} is broken: {e}", file=sys.stderr)
         return 2
     state_path, log_path = Path(args.state), Path(args.log)
+
+    if args.watchdog:
+        return watchdog(cfg, state_path.with_name("heartbeat.json"))
 
     if args.setup_ntfy:
         return setup_ntfy(Path(args.config), cfg, log_path)

@@ -66,10 +66,34 @@ Persistent=true
 WantedBy=timers.target
 UNIT
 
+cat > ~/.config/systemd/user/dealwatch-watchdog.service <<UNIT
+[Unit]
+Description=dealwatch watchdog - warn if polling stops
+
+[Service]
+Type=oneshot
+WorkingDirectory=\$HOME/$REMOTE
+ExecStart=/usr/bin/python3 \$HOME/$REMOTE/dealwatch.py --watchdog
+UNIT
+
+cat > ~/.config/systemd/user/dealwatch-watchdog.timer <<'UNIT'
+[Unit]
+Description=Check that dealwatch is still polling
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=1h
+AccuracySec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UNIT
+
 systemctl --user daemon-reload
-systemctl --user enable --now dealwatch.timer
+systemctl --user enable --now dealwatch.timer dealwatch-watchdog.timer
 loginctl enable-linger \$USER 2>/dev/null || true
-systemctl --user list-timers dealwatch.timer --no-pager
+systemctl --user list-timers 'dealwatch*' --no-pager
 REMOTE_EOF
 
 if [ "${1:-}" = "--seed" ]; then

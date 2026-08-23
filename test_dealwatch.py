@@ -61,9 +61,15 @@ class TestMatching(unittest.TestCase):
         self.assertTrue(m.hot)  # under the 2200 gpu target
 
     def test_expensive_gpu_still_alerts_but_not_hot(self):
-        m = self.ev("[GPU] ASUS ROG Astral RTX 5090 - $2,899.99")
+        m = self.ev("[GPU] ASUS ROG Astral RTX 5090 - $3,899.99")
         self.assertIsNotNone(m)
         self.assertFalse(m.hot)
+
+    def test_anything_under_3500_is_urgent(self):
+        for t in ("[GPU] ASUS ROG Astral RTX 5090 - $3,299",
+                  "[Prebuilt] Skytech 9950X3D RTX 5090 64GB - $3,450",
+                  "[GPU] MSI RTX 5090 - $2,099"):
+            self.assertTrue(self.ev(t).hot, t)
 
     def test_prebuilt_with_bonuses(self):
         m = self.ev("[Desktop] Skytech RTX 5090 / 9950X3D / 64GB DDR5 - $3,499")
@@ -91,7 +97,7 @@ class TestMatching(unittest.TestCase):
     def test_hard_price_filter(self):
         cfg = dict(CFG, hard_price_filter=True)
         cheap = evaluate(Post("x", "[GPU] RTX 5090 - $1,999", "l"), cfg)
-        dear = evaluate(Post("x", "[GPU] RTX 5090 - $3,299", "l"), cfg)
+        dear = evaluate(Post("x", "[GPU] RTX 5090 - $4,299", "l"), cfg)
         self.assertIsNotNone(cheap)
         self.assertIsNone(dear)
 
@@ -103,11 +109,16 @@ class TestMatching(unittest.TestCase):
 
 class TestFlairs(unittest.TestCase):
     def test_hyphenated_prebuilt_normalises(self):
-        p = Post(id="x", title="[Pre-Built] iBUYPOWER RTX 5090 9950X3D 64GB - $3,599", link="l")
+        p = Post(id="x", title="[Pre-Built] iBUYPOWER RTX 5090 9950X3D 64GB - $3,499", link="l")
         self.assertEqual(p.flair, "prebuilt")
         m = evaluate(p, CFG)
         self.assertEqual(m.kind, "desktop")
         self.assertTrue(m.hot)
+
+    def test_just_over_the_line_still_alerts_quietly(self):
+        m = evaluate(Post("x", "[Pre-Built] iBUYPOWER RTX 5090 9950X3D 64GB - $3,599", "l"), CFG)
+        self.assertIsNotNone(m, "over target is still worth seeing")
+        self.assertFalse(m.hot, "but not urgent")
 
     def test_bundle_flair_is_a_rig_not_a_bare_card(self):
         # A full build posted under [Bundle] must get the desktop price cap,
@@ -419,6 +430,72 @@ class TestComponentRigDetection(unittest.TestCase):
         for t in ("[GPU] ASUS TUF RTX 5090 OC - $1899.99",
                   "[GPU] Gigabyte RTX 5090 Windforce, excellent build quality - $2099"):
             self.assertEqual(self.kind_of(t), "gpu", t)
+
+class TestWatchdog(unittest.TestCase):
+    """Silence must mean "no 5090s posted", never "it died last Tuesday"."""
+
+    def setUp(self):
+        self.sent = []
+        self.orig = dealwatch.notify_telegram
+        dealwatch.notify_telegram = lambda cfg, t, b: (self.sent.append((t, b)) or True)
+
+    def tearDown(self):
+        dealwatch.notify_telegram = self.orig
+
+    def beat_file(self, d, **fields):
+        path = Path(d) / "heartbeat.json"
+        path.write_text(json.dumps(fields))
+        return path
+
+    def test_stale_poller_raises_the_alarm(self):
+        import time as _t
+        with tempfile.TemporaryDirectory() as d:
+            path = self.beat_file(d, last_ok=_t.time() - 3 * 3600, polls=40)
+            self.assertEqual(dealwatch.watchdog(DEFAULT_CONFIG, path), 1)
+            self.assertIn("stopped polling", self.sent[0][0])
+
+    def test_it_does_not_spam_the_same_alarm(self):
+        import time as _t
+        with tempfile.TemporaryDirectory() as d:
+            path = self.beat_file(d, last_ok=_t.time() - 3 * 3600)
+            dealwatch.watchdog(DEFAULT_CONFIG, path)
+            self.sent.clear()
+            dealwatch.watchdog(DEFAULT_CONFIG, path)
+            self.assertEqual(self.sent, [], "one warning an hour, not one an hour x60")
+
+    def test_healthy_poller_is_quiet_between_heartbeats(self):
+        import time as _t
+        now = _t.time()
+        with tempfile.TemporaryDirectory() as d:
+            path = self.beat_file(d, last_ok=now - 60, last_beat=now - 3600)
+            self.assertEqual(dealwatch.watchdog(DEFAULT_CONFIG, path), 0)
+            self.assertEqual(self.sent, [])
+
+    def test_daily_heartbeat_fires_and_resets_counters(self):
+        import time as _t
+        now = _t.time()
+        with tempfile.TemporaryDirectory() as d:
+            path = self.beat_file(d, last_ok=now - 60, last_beat=now - 25 * 3600,
+                                  polls=400, hits=2)
+            dealwatch.watchdog(DEFAULT_CONFIG, path)
+            self.assertIn("alive", self.sent[0][0])
+            self.assertIn("400 polls", self.sent[0][1])
+            beat = json.loads(path.read_text())
+            self.assertEqual((beat["polls"], beat["hits"]), (0, 0))
+
+    def test_no_poll_yet_is_not_an_alarm(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(dealwatch.watchdog(DEFAULT_CONFIG, Path(d) / "none.json"), 0)
+            self.assertEqual(self.sent, [])
+
+    def test_a_successful_poll_stamps_the_heartbeat(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "heartbeat.json"
+            dealwatch.record_poll(path, scanned=50, hits=1)
+            dealwatch.record_poll(path, scanned=50, hits=0)
+            beat = json.loads(path.read_text())
+            self.assertEqual((beat["polls"], beat["hits"], beat["scanned"]), (2, 1, 50))
+            self.assertGreater(beat["last_ok"], 0)
 
 
 if __name__ == "__main__":
