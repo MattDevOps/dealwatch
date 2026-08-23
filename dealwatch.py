@@ -16,6 +16,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import subprocess
 import sys
 import time
@@ -61,6 +62,10 @@ DEFAULT_CONFIG = {
     "hard_price_filter": False,
     "ntfy_topic": "",
     "ntfy_server": "https://ntfy.sh",
+    # Telegram is used when a bot token and chat id turn up in the
+    # environment or in one of these files (daytrader already writes one).
+    "telegram": True,
+    "telegram_env_files": ["~/.config/dealwatch.env", "~/.config/daytrader.env"],
     "desktop_notify": True,
     "auto_open_hot": False,
 }
@@ -69,11 +74,16 @@ DEFAULT_CONFIG = {
 # ---------------------------------------------------------------- config/state
 
 def load_config(path: Path) -> dict:
+    """DEFAULT_CONFIG, then config.json, then config.local.json.
+
+    The .local file is gitignored and is where anything private belongs --
+    the ntfy topic is a shared secret, so it must never reach a public repo.
+    """
     cfg = json.loads(json.dumps(DEFAULT_CONFIG))
-    if path.exists():
-        user = json.loads(path.read_text())
-        for k, v in user.items():
-            cfg[k] = v
+    for layer in (path, path.with_name(path.stem + ".local" + path.suffix)):
+        if layer.exists():
+            for k, v in json.loads(layer.read_text()).items():
+                cfg[k] = v
     return cfg
 
 
@@ -410,6 +420,56 @@ def notify_ntfy(cfg: dict, title: str, body: str, link: str, hot: bool) -> None:
         print(f"[warn] ntfy push failed: {e}", file=sys.stderr)
 
 
+def telegram_creds(cfg: dict) -> tuple[str, str] | None:
+    """Bot token + chat id from the environment, else the first env file
+    that carries both. Same file daytrader uses, so one setup covers both."""
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    chat = os.environ.get("TELEGRAM_CHAT_ID", "")
+    if token and chat:
+        return token, chat
+    for name in cfg.get("telegram_env_files", []):
+        path = Path(name).expanduser()
+        if not path.exists():
+            continue
+        found = {}
+        try:
+            for line in path.read_text().splitlines():
+                line = line.strip()
+                if line.startswith("#") or "=" not in line:
+                    continue
+                key, _, val = line.partition("=")
+                found[key.strip()] = val.strip().strip("'\"")
+        except OSError:
+            continue
+        if found.get("TELEGRAM_BOT_TOKEN") and found.get("TELEGRAM_CHAT_ID"):
+            return found["TELEGRAM_BOT_TOKEN"], found["TELEGRAM_CHAT_ID"]
+    return None
+
+
+def notify_telegram(cfg: dict, title: str, body: str) -> bool:
+    if not cfg.get("telegram", True):
+        return False
+    creds = telegram_creds(cfg)
+    if not creds:
+        return False
+    token, chat = creds
+    data = urllib.parse.urlencode({
+        "chat_id": chat,
+        # plain text, no parse_mode: deal titles are full of characters that
+        # would 400 the API as markdown
+        "text": f"{title}\n\n{body}",
+        "disable_web_page_preview": "false",
+    }).encode()
+    req = urllib.request.Request(
+        f"https://api.telegram.org/bot{token}/sendMessage", data=data)
+    try:
+        urllib.request.urlopen(req, timeout=15).read()
+        return True
+    except (urllib.error.URLError, TimeoutError) as e:
+        print(f"[warn] telegram send failed: {e}", file=sys.stderr)
+        return False
+
+
 def log_hit(path: Path, m: Match) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     rec = {
@@ -435,6 +495,7 @@ def alert(cfg: dict, m: Match, log_path: Path) -> None:
     if cfg.get("desktop_notify", True):
         notify_desktop(head, body, "critical" if m.hot else "normal")
     notify_ntfy(cfg, head, body, m.post.link, m.hot)
+    notify_telegram(cfg, head, body)
     if m.hot and cfg.get("auto_open_hot"):
         subprocess.Popen(["xdg-open", m.post.link],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -446,16 +507,15 @@ def setup_ntfy(config_path: Path, cfg: dict, log_path: Path) -> int:
     Phone push matters more than the desktop toast here: good 5090s sell out
     while you are away from the machine.
     """
+    local_path = config_path.with_name(config_path.stem + ".local" + config_path.suffix)
     topic = cfg.get("ntfy_topic", "").strip()
     if not topic:
         topic = f"5090-{secrets.token_urlsafe(9).replace('_', '-').lower()}"
-        raw = {}
-        if config_path.exists():
-            raw = json.loads(config_path.read_text())
+        raw = json.loads(local_path.read_text()) if local_path.exists() else {}
         raw["ntfy_topic"] = topic
-        config_path.write_text(json.dumps(raw, indent=2) + "\n")
+        local_path.write_text(json.dumps(raw, indent=2) + "\n")
         cfg["ntfy_topic"] = topic
-        print(f"generated topic and saved to {config_path}")
+        print(f"generated topic and saved to {local_path} (gitignored)")
 
     server = cfg["ntfy_server"].rstrip("/")
     print(f"""
@@ -561,8 +621,15 @@ def main() -> int:
             print("test post did not match config; check must_match/exclude")
             return 1
         alert(cfg, m, log_path)
-        print("test alert sent")
-        return 0
+        channels = []
+        if cfg.get("desktop_notify", True) and shutil.which("notify-send"):
+            channels.append("desktop")
+        if cfg.get("ntfy_topic"):
+            channels.append("ntfy")
+        if telegram_creds(cfg):
+            channels.append("telegram")
+        print(f"test alert sent via: {', '.join(channels) or 'NOTHING - no channel configured'}")
+        return 0 if channels else 1
 
     if args.once or args.seed or args.dry_run:
         try:

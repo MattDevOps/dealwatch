@@ -8,12 +8,14 @@ Pure stdlib Python, no dependencies, no reddit account needed.
 ## Quick start
 
 ```bash
-cd ~/git/dealwatch
 python3 dealwatch.py --dry-run     # see what currently matches, change nothing
 python3 dealwatch.py --test-alert  # verify notifications actually reach you
-python3 dealwatch.py --setup-ntfy  # optional but recommended: phone push
 ./install.sh                       # systemd --user timer, polls every 3 min
 ```
+
+For a server instead of this machine, see [Running it on a
+server](#running-it-on-a-server). For phone alerts, see [Phone
+alerts](#phone-alerts).
 
 The first real run seeds state silently (no backlog blast); after that you only
 get alerts for genuinely new posts.
@@ -24,11 +26,33 @@ systemctl --user disable --now dealwatch.timer     # stop
 cat state/hits.jsonl                               # every alert ever fired
 ```
 
-## Phone alerts (recommended)
+## Running it on a server
+
+A laptop that sleeps misses deals. `deploy-vps.sh` rsyncs the code to a box,
+runs the test suite there, installs the same systemd timer, and enables linger
+so it keeps polling with nobody logged in:
+
+```bash
+cp deploy.env.example deploy.env   # fill in user@host + key
+./deploy-vps.sh --seed             # --seed on the first deploy only
+```
+
+Reddit serves the feed to datacenter IPs, so a cheap VPS works.
+
+## Phone alerts
 
 Good 5090 deals die in minutes, and a desktop toast only helps if you are at the
-desk. `--setup-ntfy` generates a private random topic, writes it to
-`config.json`, and sends a test push:
+desk. Two options, both optional -- desktop notification works out of the box.
+
+**Telegram** (nothing to install if you already have a bot): set
+`TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in the environment or in
+`~/.config/dealwatch.env`. `~/.config/daytrader.env` is also read, so a box
+already running that project needs no new setup. Get a token from @BotFather
+and your chat id from `https://api.telegram.org/bot<TOKEN>/getUpdates`.
+
+**ntfy** (no account, but you install an app): `--setup-ntfy` generates a
+private random topic, writes it to the gitignored `config.local.json`, and
+sends a test push:
 
 ```bash
 python3 dealwatch.py --setup-ntfy
@@ -36,8 +60,12 @@ python3 dealwatch.py --setup-ntfy
 
 Then install the free ntfy app (iOS/Android/F-Droid) and subscribe to the topic
 it prints. Nothing leaves your machine until you run that command. Anyone who
-knows the topic string can read your alerts, so keep it secret. Hot deals push
-at `urgent` priority so they break through Do Not Disturb.
+knows the topic string can read your alerts, so keep it secret (which is why it
+lands in `config.local.json`, never in git). Hot deals push at `urgent`
+priority so they break through Do Not Disturb.
+
+`--test-alert` prints which channels actually fired, so a misconfigured one is
+visible immediately rather than the first time a deal shows up.
 
 ## How it works
 
