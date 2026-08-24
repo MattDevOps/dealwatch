@@ -483,6 +483,51 @@ class TestWatchdog(unittest.TestCase):
             beat = json.loads(path.read_text())
             self.assertEqual((beat["polls"], beat["hits"]), (0, 0))
 
+    def test_heartbeat_carries_the_links(self):
+        import time as _t
+        now = _t.time()
+        with tempfile.TemporaryDirectory() as d:
+            path = self.beat_file(
+                d, last_ok=now - 60, last_beat=now - 25 * 3600, polls=400, hits=2,
+                recent=[{"title": "[GPU] ASUS TUF RTX 5090 OC", "price": 1899.0,
+                         "link": "https://reddit.com/a", "hot": True},
+                        {"title": "[Desktop] 5090 prebuilt", "price": None,
+                         "link": "https://reddit.com/b", "hot": False}])
+            dealwatch.watchdog(DEFAULT_CONFIG, path)
+            body = self.sent[0][1]
+            self.assertIn("https://reddit.com/a", body)
+            self.assertIn("https://reddit.com/b", body)
+            self.assertIn("$1,899", body)
+            self.assertIn("price?", body, "an unpriced hit is still worth a link")
+            self.assertLess(body.index("reddit.com/b"), body.index("reddit.com/a"),
+                            "newest first")
+            self.assertEqual(json.loads(path.read_text())["recent"], [],
+                             "shipped links must not repeat in the next heartbeat")
+
+    def test_a_big_day_is_truncated_not_dumped(self):
+        import time as _t
+        now = _t.time()
+        with tempfile.TemporaryDirectory() as d:
+            recent = [{"title": f"5090 #{i}", "price": float(i),
+                       "link": f"https://reddit.com/{i}"} for i in range(40)]
+            path = self.beat_file(d, last_ok=now - 60, last_beat=now - 25 * 3600,
+                                  polls=400, hits=40, recent=recent)
+            dealwatch.watchdog(DEFAULT_CONFIG, path)
+            body = self.sent[0][1]
+            self.assertEqual(body.count("https://reddit.com/"),
+                             dealwatch.RECENT_SHOW)
+            self.assertIn(f"and {40 - dealwatch.RECENT_SHOW} more", body)
+            self.assertLess(len(body), 4096, "telegram rejects longer messages")
+
+    def test_quiet_day_still_reads_cleanly(self):
+        import time as _t
+        now = _t.time()
+        with tempfile.TemporaryDirectory() as d:
+            path = self.beat_file(d, last_ok=now - 60, last_beat=now - 25 * 3600,
+                                  polls=400, hits=0)
+            dealwatch.watchdog(DEFAULT_CONFIG, path)
+            self.assertIn("0 matching post(s)", self.sent[0][1])
+
     def test_no_poll_yet_is_not_an_alarm(self):
         with tempfile.TemporaryDirectory() as d:
             self.assertEqual(dealwatch.watchdog(DEFAULT_CONFIG, Path(d) / "none.json"), 0)
@@ -496,6 +541,34 @@ class TestWatchdog(unittest.TestCase):
             beat = json.loads(path.read_text())
             self.assertEqual((beat["polls"], beat["hits"], beat["scanned"]), (2, 1, 50))
             self.assertGreater(beat["last_ok"], 0)
+
+    def test_a_poll_keeps_what_it_matched(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "heartbeat.json"
+            def match(i):
+                post = dealwatch.Post(id=str(i), title=f"[GPU] RTX 5090 #{i}",
+                                      link=f"https://reddit.com/{i}")
+                return dealwatch.Match(post=post, price=1900.0 + i, hot=bool(i % 2))
+            dealwatch.record_poll(path, scanned=25, hits=1, matches=[match(0)])
+            dealwatch.record_poll(path, scanned=25, hits=0)
+            dealwatch.record_poll(path, scanned=25, hits=1, matches=[match(1)])
+            recent = json.loads(path.read_text())["recent"]
+            self.assertEqual([r["link"] for r in recent],
+                             ["https://reddit.com/0", "https://reddit.com/1"])
+            self.assertEqual(recent[1]["hot"], True)
+
+    def test_the_kept_list_is_bounded(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "heartbeat.json"
+            for i in range(dealwatch.RECENT_KEEP + 10):
+                post = dealwatch.Post(id=str(i), title="5090",
+                                      link=f"https://reddit.com/{i}")
+                dealwatch.record_poll(path, scanned=25, hits=1,
+                                      matches=[dealwatch.Match(post=post)])
+            recent = json.loads(path.read_text())["recent"]
+            self.assertEqual(len(recent), dealwatch.RECENT_KEEP)
+            self.assertEqual(recent[-1]["link"],
+                             f"https://reddit.com/{dealwatch.RECENT_KEEP + 9}")
 
 
 if __name__ == "__main__":

@@ -75,6 +75,11 @@ DEFAULT_CONFIG = {
     "heartbeat_hours": 24,
 }
 
+# How many matched posts the heartbeat carries: kept in the state file, and
+# shown in the message. Telegram caps a message at 4096 characters.
+RECENT_KEEP = 25
+RECENT_SHOW = 15
+
 
 # ---------------------------------------------------------------- config/state
 
@@ -106,14 +111,38 @@ def save_beat(path: Path, beat: dict) -> None:
     tmp.replace(path)
 
 
-def record_poll(path: Path, scanned: int, hits: int) -> None:
-    """Stamp a successful poll. The watchdog reads this."""
+def record_poll(path: Path, scanned: int, hits: int,
+                matches: "list[Match] | tuple" = ()) -> None:
+    """Stamp a successful poll, and keep what it found.
+
+    The heartbeat is only useful if it says *which* posts matched, so the
+    matches ride along in the state file until the next heartbeat ships
+    them. Capped: a burst of hits must not grow this file without bound.
+    """
     beat = load_beat(path)
     beat["last_ok"] = time.time()
     beat["polls"] = beat.get("polls", 0) + 1
     beat["hits"] = beat.get("hits", 0) + hits
     beat["scanned"] = scanned
+    if matches:
+        recent = list(beat.get("recent", []))
+        recent.extend({"title": m.post.title, "link": m.post.link,
+                       "price": m.price, "hot": m.hot} for m in matches)
+        beat["recent"] = recent[-RECENT_KEEP:]
     save_beat(path, beat)
+
+
+def format_recent(recent: list[dict], total: int) -> str:
+    """The links, newest first, for the heartbeat body."""
+    lines = []
+    for r in reversed(recent[-RECENT_SHOW:]):
+        price = f"${r['price']:,.0f}" if r.get("price") is not None else "price?"
+        flame = "HOT " if r.get("hot") else ""
+        lines.append(f"{flame}{price}  {r.get('title', '')}\n{r.get('link', '')}")
+    dropped = total - len(lines)
+    if dropped > 0:
+        lines.append(f"...and {dropped} more (see the log)")
+    return "\n\n".join(lines)
 
 
 def watchdog(cfg: dict, beat_path: Path) -> int:
@@ -149,12 +178,18 @@ def watchdog(cfg: dict, beat_path: Path) -> int:
     every = float(cfg.get("heartbeat_hours", 24)) * 3600
     if every > 0 and now - beat.get("last_beat", 0) > every:
         hours = int((now - beat.get("last_beat", now - every)) // 3600)
-        sent = notify_telegram(
-            cfg, "dealwatch is alive",
-            f"{beat.get('polls', 0)} polls in the last {hours}h, "
-            f"{beat.get('hits', 0)} matching post(s). "
-            f"Watching r/{cfg['subreddit']} for 5090s.")
-        beat.update(last_beat=now, polls=0, hits=0)
+        hits = beat.get("hits", 0)
+        recent = list(beat.get("recent", []))
+        body = (f"{beat.get('polls', 0)} polls in the last {hours}h, "
+                f"{hits} matching post(s). "
+                f"Watching r/{cfg['subreddit']} for 5090s.")
+        if recent:
+            body += "\n\n" + format_recent(recent, max(hits, len(recent)))
+        elif hits:
+            # counted before this version started keeping the links
+            body += "\n\nLinks were not recorded for these; see the log."
+        sent = notify_telegram(cfg, "dealwatch is alive", body)
+        beat.update(last_beat=now, polls=0, hits=0, recent=[])
         save_beat(beat_path, beat)
         print("heartbeat sent" if sent else "heartbeat skipped: no telegram channel")
     else:
@@ -616,7 +651,7 @@ def run_once(cfg: dict, state_path: Path, log_path: Path,
     seen_set = set(seen)
     first_run = not state_path.exists()
     posts = parse_feed(fetch(feed_url(cfg), cfg["user_agent"]))
-    hits, errors = 0, []
+    hits, errors, matched = 0, [], []
     for p in posts:
         if p.id in seen_set:
             continue
@@ -636,6 +671,7 @@ def run_once(cfg: dict, state_path: Path, log_path: Path,
         if not m:
             continue
         hits += 1
+        matched.append(m)
         if seed or first_run or dry:
             price = f"${m.price:,.0f}" if m.price else "price?"
             state = "seeded" if (seed or first_run) else "dry-run"
@@ -661,7 +697,8 @@ def run_once(cfg: dict, state_path: Path, log_path: Path,
         raise RuntimeError(f"{len(errors)} post(s) could not be evaluated: "
                            + "; ".join(errors[:3]))
     if not dry:
-        record_poll(state_path.with_name("heartbeat.json"), len(posts), hits)
+        record_poll(state_path.with_name("heartbeat.json"), len(posts), hits,
+                    matched)
     return hits
 
 

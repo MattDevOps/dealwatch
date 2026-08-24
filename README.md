@@ -72,8 +72,12 @@ visible immediately rather than the first time a deal shows up.
 No alerts can mean "no 5090s posted" or "it died on Tuesday", and those look
 identical from your phone. A second timer runs `--watchdog` hourly: it messages
 you if no poll has succeeded in 30 minutes (at most one warning an hour), and
-otherwise confirms it is alive once a day with a poll count. Every successful
-poll stamps `state/heartbeat.json`.
+otherwise confirms it is alive once a day. The daily message carries the poll
+count *and* every post that matched since the last one -- price, title and
+link, newest first -- so it doubles as a digest of what you may have missed
+(capped at 15 links; the rest are counted and left in the log). Every
+successful poll stamps `state/heartbeat.json`, which holds those links until
+the heartbeat ships them.
 
 ## How it works
 
