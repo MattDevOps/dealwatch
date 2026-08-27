@@ -71,13 +71,16 @@ visible immediately rather than the first time a deal shows up.
 
 No alerts can mean "no 5090s posted" or "it died on Tuesday", and those look
 identical from your phone. A second timer runs `--watchdog` hourly: it messages
-you if no poll has succeeded in 30 minutes (at most one warning an hour), and
-otherwise confirms it is alive once a day. The daily message carries the poll
-count *and* every post that matched since the last one -- price, title and
-link, newest first -- so it doubles as a digest of what you may have missed
-(capped at 15 links; the rest are counted and left in the log). Every
-successful poll stamps `state/heartbeat.json`, which holds those links until
-the heartbeat ships them.
+you if no poll has succeeded in 30 minutes (at most one warning an hour). That
+is the only routine message it sends: a working dealwatch is silent until a
+deal shows up.
+
+It can also confirm it is alive on a schedule, carrying the poll count *and*
+every post that matched since the last one -- price, title and link, newest
+first -- as a digest of what you may have missed (capped at 15 links; the rest
+are counted and left in the log). That is **off** (`heartbeat_hours: 0`); set
+it to `24` for a daily one. Every successful poll stamps
+`state/heartbeat.json`, which holds those links until a heartbeat ships them.
 
 ## How it works
 
@@ -115,7 +118,7 @@ Anything in `config.json` overrides `DEFAULT_CONFIG` in `dealwatch.py`.
 | `target_price_gpu` | 3500 | at or under this, a GPU is flagged HOT |
 | `target_price_desktop` | 3500 | same for a prebuilt |
 | `stale_minutes` | 30 | watchdog warns if polling stops for this long |
-| `heartbeat_hours` | 24 | how often the watchdog confirms it is alive |
+| `heartbeat_hours` | 0 | how often the watchdog confirms it is alive; 0 = never |
 | `hard_price_filter` | `false` | `true` = drop posts priced above target |
 | `auto_open_hot` | `false` | `true` = open hot deals in the browser |
 

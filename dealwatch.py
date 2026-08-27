@@ -69,10 +69,12 @@ DEFAULT_CONFIG = {
     "telegram_env_files": ["~/.config/dealwatch.env", "~/.config/daytrader.env"],
     "desktop_notify": True,
     "auto_open_hot": False,
-    # Watchdog: warn if polling stops, and prove it is alive once a day, so
-    # silence means "no 5090s posted" rather than "it died last Tuesday".
+    # Watchdog: warn if polling stops, so silence means "no 5090s posted"
+    # rather than "it died last Tuesday". That warning is the only routine
+    # message; heartbeat_hours > 0 adds a periodic "still alive" digest of
+    # what matched, which is off because a deal alert is the only wanted ping.
     "stale_minutes": 30,
-    "heartbeat_hours": 24,
+    "heartbeat_hours": 0,
 }
 
 # How many matched posts the heartbeat carries: kept in the state file, and

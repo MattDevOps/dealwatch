@@ -5,5 +5,6 @@
   "hard_price_filter": false,
   "ntfy_topic": "",
   "desktop_notify": true,
-  "auto_open_hot": false
+  "auto_open_hot": false,
+  "heartbeat_hours": 0
 }

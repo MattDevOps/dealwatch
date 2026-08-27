@@ -434,6 +434,9 @@ class TestComponentRigDetection(unittest.TestCase):
 class TestWatchdog(unittest.TestCase):
     """Silence must mean "no 5090s posted", never "it died last Tuesday"."""
 
+    # The shipped default is heartbeat off; these tests opt in to it.
+    daily = {**DEFAULT_CONFIG, "heartbeat_hours": 24}
+
     def setUp(self):
         self.sent = []
         self.orig = dealwatch.notify_telegram
@@ -468,8 +471,27 @@ class TestWatchdog(unittest.TestCase):
         now = _t.time()
         with tempfile.TemporaryDirectory() as d:
             path = self.beat_file(d, last_ok=now - 60, last_beat=now - 3600)
-            self.assertEqual(dealwatch.watchdog(DEFAULT_CONFIG, path), 0)
+            self.assertEqual(dealwatch.watchdog(self.daily, path), 0)
             self.assertEqual(self.sent, [])
+
+    def test_heartbeat_off_stays_silent_forever(self):
+        """heartbeat_hours=0 means: only ever message me about a deal."""
+        import time as _t
+        now = _t.time()
+        cfg = {**DEFAULT_CONFIG, "heartbeat_hours": 0}
+        with tempfile.TemporaryDirectory() as d:
+            path = self.beat_file(d, last_ok=now - 60, last_beat=now - 400 * 3600,
+                                  polls=9000, hits=3)
+            self.assertEqual(dealwatch.watchdog(cfg, path), 0)
+            self.assertEqual(self.sent, [], "no 'alive' ping when it is switched off")
+
+    def test_heartbeat_off_still_reports_a_dead_poller(self):
+        import time as _t
+        cfg = {**DEFAULT_CONFIG, "heartbeat_hours": 0}
+        with tempfile.TemporaryDirectory() as d:
+            path = self.beat_file(d, last_ok=_t.time() - 3 * 3600, polls=40)
+            self.assertEqual(dealwatch.watchdog(cfg, path), 1)
+            self.assertIn("stopped polling", self.sent[0][0])
 
     def test_daily_heartbeat_fires_and_resets_counters(self):
         import time as _t
@@ -477,7 +499,7 @@ class TestWatchdog(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             path = self.beat_file(d, last_ok=now - 60, last_beat=now - 25 * 3600,
                                   polls=400, hits=2)
-            dealwatch.watchdog(DEFAULT_CONFIG, path)
+            dealwatch.watchdog(self.daily, path)
             self.assertIn("alive", self.sent[0][0])
             self.assertIn("400 polls", self.sent[0][1])
             beat = json.loads(path.read_text())
@@ -493,7 +515,7 @@ class TestWatchdog(unittest.TestCase):
                          "link": "https://reddit.com/a", "hot": True},
                         {"title": "[Desktop] 5090 prebuilt", "price": None,
                          "link": "https://reddit.com/b", "hot": False}])
-            dealwatch.watchdog(DEFAULT_CONFIG, path)
+            dealwatch.watchdog(self.daily, path)
             body = self.sent[0][1]
             self.assertIn("https://reddit.com/a", body)
             self.assertIn("https://reddit.com/b", body)
@@ -512,7 +534,7 @@ class TestWatchdog(unittest.TestCase):
                        "link": f"https://reddit.com/{i}"} for i in range(40)]
             path = self.beat_file(d, last_ok=now - 60, last_beat=now - 25 * 3600,
                                   polls=400, hits=40, recent=recent)
-            dealwatch.watchdog(DEFAULT_CONFIG, path)
+            dealwatch.watchdog(self.daily, path)
             body = self.sent[0][1]
             self.assertEqual(body.count("https://reddit.com/"),
                              dealwatch.RECENT_SHOW)
@@ -525,7 +547,7 @@ class TestWatchdog(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             path = self.beat_file(d, last_ok=now - 60, last_beat=now - 25 * 3600,
                                   polls=400, hits=0)
-            dealwatch.watchdog(DEFAULT_CONFIG, path)
+            dealwatch.watchdog(self.daily, path)
             self.assertIn("0 matching post(s)", self.sent[0][1])
 
     def test_no_poll_yet_is_not_an_alarm(self):
