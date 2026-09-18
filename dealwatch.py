@@ -76,6 +76,7 @@ DEFAULT_CONFIG = {
     # message; heartbeat_hours > 0 adds a periodic "still alive" digest of
     # what matched, which is off because a deal alert is the only wanted ping.
     "stale_minutes": 30,
+    "check_hint": "",
     "heartbeat_hours": 0,
 }
 

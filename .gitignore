@@ -1,7 +1,8 @@
 state/
 __pycache__/
 *.pyc
-config.local.json
+*.local.json
+*.host.json
 deploy.env
 *.env
 !deploy.env.example

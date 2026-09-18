@@ -1,11 +1,17 @@
 #!/usr/bin/env bash
-# Deploy dealwatch to the VPS so alerts keep coming with the laptop shut.
+# Deploy both watchers to the VPS so alerts keep coming with the laptop shut.
 #
-# Same box and key conventions as daytrader (scripts/push_to_vps.sh).
-# Ships code + config, installs a systemd --user timer, enables linger.
+# Runs the test suites here, ships the tracked code + config, runs the
+# suites again on the box, and rewrites this repo's block in the box's
+# crontab. Cron, not systemd --user timers: the box has Linger=no, so user
+# timers would not survive a reboot.
+#
+# Each <name>.vps.json becomes the box's <name>.host.json (its role).
+# dealwatch runs in full. carwatch runs its carwiz source only: yad2 blocks
+# datacenter IPs outright.
 #
 # Usage: ./deploy-vps.sh [--seed]
-#   --seed   mark everything currently on the feed as seen (no backlog blast)
+#   --seed   first deploy only: mark everything on the reddit feed as seen
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -23,85 +29,60 @@ if [ -z "$BOX" ]; then
   exit 2
 fi
 
-SSH_OPTS="-i $KEY -o IdentitiesOnly=yes -o UserKnownHostsFile=$KNOWN -o ConnectTimeout=15"
+SSH_OPTS="-i $KEY -o IdentitiesOnly=yes -o UserKnownHostsFile=$KNOWN -o ConnectTimeout=15 -o BatchMode=yes"
 ssh_box() { ssh $SSH_OPTS "$BOX" "$@"; }
+ship() { rsync -az -e "ssh $SSH_OPTS" "$@"; }
+
+# minute-field | watcher | mode. The whole block is rewritten on every
+# deploy, so editing a schedule here (or dropping a row) always lands.
+JOBS="
+*/3  dealwatch --once
+7    dealwatch --watchdog
+*/10 carwatch  --once
+37   carwatch  --watchdog
+"
+
+echo "Running the test suites here first (the box is live; do not ship red) ..."
+./run-suites.sh
 
 echo "Shipping to $BOX:$REMOTE ..."
 ssh_box "mkdir -p $REMOTE"
-for f in dealwatch.py test_dealwatch.py config.json README.md; do
-  rsync -az -e "ssh $SSH_OPTS" "$f" "$BOX:$REMOTE/$f"
+mapfile -t FILES < <(git ls-files '*.py' '*.json' run-suites.sh README.md)
+ship "${FILES[@]}" "$BOX:$REMOTE/"
+for role in *.vps.json; do
+  ship "$role" "$BOX:$REMOTE/${role%.vps.json}.host.json"
 done
 # Private layer (ntfy topic). Never in git; the box needs it to push alerts.
-[ -f config.local.json ] && rsync -az -e "ssh $SSH_OPTS" config.local.json "$BOX:$REMOTE/config.local.json"
+[ -f config.local.json ] && ship config.local.json "$BOX:$REMOTE/config.local.json"
 
-echo "Running the test suite on the box ..."
-ssh_box "cd $REMOTE && python3 test_dealwatch.py -q 2>&1 | tail -3"
+echo "Running the test suites on the box (older python there) ..."
+ssh_box "$REMOTE/run-suites.sh"
 
-echo "Installing the timer ..."
-ssh_box "bash -s" <<REMOTE_EOF
+echo "Installing the cron block ..."
+ssh_box "JOBS='$JOBS' REMOTE='$REMOTE' bash -s" <<'REMOTE_EOF'
 set -euo pipefail
-mkdir -p ~/.config/systemd/user
-cat > ~/.config/systemd/user/dealwatch.service <<UNIT
-[Unit]
-Description=dealwatch - r/buildapcsales 5090 alerter
-After=network-online.target
-
-[Service]
-Type=oneshot
-WorkingDirectory=\$HOME/$REMOTE
-ExecStart=/usr/bin/python3 \$HOME/$REMOTE/dealwatch.py --once
-UNIT
-
-cat > ~/.config/systemd/user/dealwatch.timer <<'UNIT'
-[Unit]
-Description=Poll r/buildapcsales for 5090 deals
-
-[Timer]
-OnBootSec=2min
-OnUnitActiveSec=3min
-AccuracySec=30s
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-UNIT
-
-cat > ~/.config/systemd/user/dealwatch-watchdog.service <<UNIT
-[Unit]
-Description=dealwatch watchdog - warn if polling stops
-
-[Service]
-Type=oneshot
-WorkingDirectory=\$HOME/$REMOTE
-ExecStart=/usr/bin/python3 \$HOME/$REMOTE/dealwatch.py --watchdog
-UNIT
-
-cat > ~/.config/systemd/user/dealwatch-watchdog.timer <<'UNIT'
-[Unit]
-Description=Check that dealwatch is still polling
-
-[Timer]
-OnBootSec=10min
-OnUnitActiveSec=1h
-AccuracySec=5min
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-UNIT
-
-systemctl --user daemon-reload
-systemctl --user enable --now dealwatch.timer dealwatch-watchdog.timer
-loginctl enable-linger \$USER 2>/dev/null || true
-systemctl --user list-timers 'dealwatch*' --no-pager
+DIR="$HOME/$REMOTE"
+BEGIN="# BEGIN dealwatch (managed by deploy-vps.sh)"
+END="# END dealwatch"
+block="$BEGIN"
+while read -r minute name mode; do
+  [ -n "$minute" ] || continue
+  block+=$'\n'"$minute * * * * cd $DIR && /usr/bin/python3 $name.py $mode >> $DIR/$name.log 2>&1"
+done <<<"$JOBS"
+block+=$'\n'"$END"
+# Drop the old block, and any pre-marker line that runs from this directory.
+current="$(crontab -l 2>/dev/null || true)"
+kept="$(sed "/^$BEGIN\$/,/^$END\$/d" <<<"$current" | grep -vF "cd $DIR && " || true)"
+printf '%s\n%s\n' "$kept" "$block" | crontab -
+crontab -l | sed -n "/^$BEGIN\$/,/^$END\$/p"
 REMOTE_EOF
 
 if [ "${1:-}" = "--seed" ]; then
-  echo "Seeding remote state ..."
+  echo "Seeding remote dealwatch state ..."
   ssh_box "cd $REMOTE && python3 dealwatch.py --seed | tail -3"
 fi
 
 echo
 echo "done. useful:"
-echo "  ssh \$BOX 'journalctl --user -u dealwatch.service -f'"
-echo "  ssh \$BOX 'cd $REMOTE && python3 dealwatch.py --test-alert'"
+echo "  ssh $BOX 'tail -f $REMOTE/dealwatch.log $REMOTE/carwatch.log'"
+echo "  ssh $BOX 'cd $REMOTE && python3 carwatch.py --test-alert'"

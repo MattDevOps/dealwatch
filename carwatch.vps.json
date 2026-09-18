@@ -1,0 +1,6 @@
+{
+  "_comment": "Shipped to the VPS as carwatch.local.json by deploy-vps.sh. yad2 blocks datacenter IPs outright (Radware 'Block' page, browser and API alike), so the box polls carwiz only; yad2 stays on a machine with a residential IP.",
+  "sources": ["carwiz"],
+  "watch_label": "carwiz for a facelift Ioniq 5 (VPS)",
+  "check_hint": "ssh to the box, then: tail -50 ~/dealwatch/carwatch.log; crontab -l"
+}

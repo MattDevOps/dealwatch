@@ -38,6 +38,7 @@ DEFAULT_CONFIG = {
     "telegram_env_files": ["~/.config/dealwatch.env", "~/.config/daytrader.env"],
     "watch_label": "yad2 + carwiz for a facelift Ioniq 5",
     "stale_minutes": 45,
+    "check_hint": "",
     "heartbeat_hours": 0,
     **src_yad2.DEFAULTS,
     **src_carwiz.DEFAULTS,
@@ -91,9 +92,10 @@ def digest(cfg: dict, found: list[tuple[Listing, Verdict]]) -> None:
     """First run: one message with everything live right now, so the seed
     is not silent but also not twenty pings."""
     if not found:
+        where = " or ".join(cfg["sources"])
         notify_telegram(cfg, "carwatch is armed",
-                        "No facelift Ioniq 5 listed right now on yad2 or "
-                        "carwiz. You get a ping when one appears.")
+                        f"No facelift Ioniq 5 listed right now on {where}. "
+                        "You get a ping when one appears.")
         return
     parts = [f"{headline(l, v)}\n{message(l, v)}" for l, v in found]
     notify_telegram(cfg, f"carwatch is armed: {len(found)} listed right now",

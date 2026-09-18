@@ -1,6 +1,7 @@
 """What a watcher keeps on disk, and the watchdog that reads it.
 
-config: defaults, then <name>.json, then <name>.local.json (gitignored).
+config: defaults, then <name>.json, then <name>.host.json (this machine's
+        role), then <name>.local.json (private); the last two gitignored.
 seen:   ids already judged, oldest first, trimmed.
 beat:   when the last poll succeeded and what it found, for the watchdog.
 """
@@ -21,13 +22,16 @@ WARN_EVERY_SECONDS = 3600   # a stopped poller is reported at most hourly
 
 
 def load_config(path: Path, defaults: dict) -> dict:
-    """defaults, then path, then path's .local twin.
+    """defaults, then path, then path's .host twin, then its .local twin.
 
+    .host says what this machine's role is (which sources it polls, where
+    its logs are); deploy-vps.sh writes the box's from <name>.vps.json.
     The .local file is gitignored and is where anything private belongs --
     the ntfy topic is a shared secret, so it must never reach a public repo.
     """
     cfg = json.loads(json.dumps(defaults))
-    for layer in (path, path.with_name(path.stem + ".local" + path.suffix)):
+    twins = [path.with_name(f"{path.stem}.{kind}{path.suffix}") for kind in ("host", "local")]
+    for layer in (path, *twins):
         if layer.exists():
             for k, v in json.loads(layer.read_text()).items():
                 cfg[k] = v
@@ -132,11 +136,13 @@ def watchdog(cfg: dict, beat_path: Path, name: str, label: str) -> int:
     if quiet > stale_after:
         mins = int(quiet // 60)
         if now - beat.get("last_warn", 0) > WARN_EVERY_SECONDS:
+            # A cron box has no timer unit to look at; its config says where.
+            hint = cfg["check_hint"] or f"systemctl --user status {name}.timer"
             notify_telegram(
                 cfg, f"{name} has stopped polling",
                 f"No successful poll for {mins} minutes "
                 f"(expected one every few minutes).\n"
-                f"Check: systemctl --user status {name}.timer")
+                f"Check: {hint}")
             beat["last_warn"] = now
             save_beat(beat_path, beat)
         print(f"STALE: last successful poll {mins} minutes ago")

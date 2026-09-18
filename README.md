@@ -28,16 +28,21 @@ cat state/hits.jsonl                               # every alert ever fired
 
 ## Running it on a server
 
-A laptop that sleeps misses deals. `deploy-vps.sh` rsyncs the code to a box,
-runs the test suite there, installs the same systemd timer, and enables linger
-so it keeps polling with nobody logged in:
+A laptop that sleeps misses deals. `deploy-vps.sh` runs both test suites here,
+rsyncs the tracked code to a box, runs the suites again there (the box's python
+is older), and rewrites its own marked block in the box's crontab from the
+`JOBS` table at the top of the script. Cron rather than systemd user timers,
+because those die at reboot on a box without linger. Run it again after any
+change: a new schedule or a dropped job always lands, and crontab lines that
+are not its own are left alone.
 
 ```bash
 cp deploy.env.example deploy.env   # fill in user@host + key
 ./deploy-vps.sh --seed             # --seed on the first deploy only
 ```
 
-Reddit serves the feed to datacenter IPs, so a cheap VPS works.
+Reddit serves the feed to datacenter IPs, so a cheap VPS works for dealwatch.
+carwatch is split: see "Where each source runs" below.
 
 ## Phone alerts
 
@@ -119,6 +124,7 @@ Anything in `config.json` overrides `DEFAULT_CONFIG` in `dealwatch.py`.
 | `target_price_desktop` | 3500 | same for a prebuilt |
 | `stale_minutes` | 30 | watchdog warns if polling stops for this long |
 | `heartbeat_hours` | 0 | how often the watchdog confirms it is alive; 0 = never |
+| `check_hint` | "" | what the stale warning tells you to look at; empty = the systemd timer. A cron box sets it in `<name>.host.json` |
 | `hard_price_filter` | `false` | `true` = drop posts priced above target |
 | `auto_open_hot` | `false` | `true` = open hot deals in the browser |
 
@@ -144,6 +150,7 @@ Only want full rigs with the CPU you actually want:
 ## Tests
 
 ```bash
+./run-suites.sh          # every test_*.py; what deploy-vps.sh gates on
 python3 test_dealwatch.py
 ```
 
@@ -192,8 +199,26 @@ passes. The installer runs it under Xvfb so no window ever appears:
 sudo dnf install xorg-x11-server-Xvfb     # once; google-chrome must be installed too
 ```
 
-Datacenter IPs are likely to fail the same wall, which is why this one runs
-on the laptop rather than the VPS. carwiz is plain HTML and needs none of it.
+carwiz is plain HTML and needs none of it.
+
+**Where each source runs.** Tested 2026-09-18: the same windowed, patchright
+driven Chromium that clears the wall in 5 seconds from a home connection gets
+Radware's hard "Block" page from an Oracle Cloud IP, and so does yad2's JSON
+gateway. The wall is judging the IP, not the browser, so no browser trick on
+the VPS fixes it. Hence the split, done with the gitignored `.host` config
+layer (this machine's role; `.local` stays for secrets) so both machines run
+the same code:
+
+| machine | `carwatch.host.json` | polls |
+|---|---|---|
+| VPS (cron, every 10 min) | shipped from `carwatch.vps.json` | carwiz |
+| a machine on a residential IP (systemd timer) | `{"sources": ["yad2"]}` | yad2 |
+
+Each keeps its own seen-state and watchdog, and no listing is alerted twice
+because no source is polled twice. Moving yad2 to the VPS too needs a
+residential or Israeli exit IP for that one source (a residential proxy, or
+a tunnel to an always-on device at home); `check_hint` in the config sets
+what the watchdog tells you to look at on a box without timer units.
 
 State lives next to dealwatch's: `state/carwatch-seen.json`,
 `state/carwatch-hits.jsonl`, `state/carwatch-heartbeat.json`, and the Chrome

@@ -1,0 +1,4 @@
+{
+  "_comment": "Shipped to the VPS as config.host.json by deploy-vps.sh: the box runs from cron, so there is no timer unit to point at.",
+  "check_hint": "ssh to the box, then: tail -50 ~/dealwatch/dealwatch.log; crontab -l"
+}

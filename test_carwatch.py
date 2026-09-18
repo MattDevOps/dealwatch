@@ -303,6 +303,15 @@ class TestFlow(unittest.TestCase):
         self.assertEqual(self.sent, [])
         self.assertFalse(self.state.exists())
 
+    def test_armed_digest_names_only_the_polled_sources(self):
+        sent = []
+        cfg = dict(carwatch.DEFAULT_CONFIG, sources=["carwiz"])
+        with mock.patch.object(carwatch, "notify_telegram",
+                               lambda cfg, t, b: sent.append((t, b)) or True):
+            carwatch.digest(cfg, [])
+        self.assertIn("on carwiz.", sent[0][1])
+        self.assertNotIn("yad2", sent[0][1])
+
     def test_seed_marks_without_judging(self):
         FakeSource.listings = [L(id="x", year=2025, trim="Limited", hp=229)]
         FakeSource.detail = {"x": RuntimeError("must not be called")}
@@ -323,12 +332,46 @@ class TestWatchdogName(unittest.TestCase):
             self.assertEqual(sent[0][0], "carwatch has stopped polling")
             self.assertIn("carwatch.timer", sent[0][1])
 
+    def test_stale_warning_uses_the_box_hint(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "beat.json"
+            state.save_beat(path, {"last_ok": 1})
+            sent = []
+            cfg = dict(carwatch.DEFAULT_CONFIG, check_hint="tail ~/dealwatch/carwatch.log")
+            with mock.patch.object(state, "notify_telegram",
+                                   lambda cfg, t, b: sent.append((t, b)) or True):
+                state.watchdog(cfg, path, name="carwatch", label="cars")
+            self.assertIn("Check: tail ~/dealwatch/carwatch.log", sent[0][1])
+            self.assertNotIn("systemctl", sent[0][1])
+
     def test_a_poll_stamps_the_beat(self):
         with tempfile.TemporaryDirectory() as d:
             beat = Path(d) / "beat.json"
             cfg = dict(carwatch.DEFAULT_CONFIG, sources=[], telegram=False)
             carwatch.run_once(cfg, Path(d) / "seen.json", Path(d) / "hits.jsonl", beat)
             self.assertEqual(state.load_beat(beat)["polls"], 1)
+
+
+class TestConfigLayers(unittest.TestCase):
+    def test_host_layer_sets_the_role_and_local_still_wins(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d) / "carwatch.json"
+            base.write_text('{"sources": ["yad2", "carwiz"], "stale_minutes": 45}')
+            (Path(d) / "carwatch.host.json").write_text(
+                '{"sources": ["carwiz"], "check_hint": "tail the log"}')
+            (Path(d) / "carwatch.local.json").write_text('{"check_hint": "private"}')
+            cfg = state.load_config(base, carwatch.DEFAULT_CONFIG)
+        self.assertEqual(cfg["sources"], ["carwiz"])
+        self.assertEqual(cfg["check_hint"], "private")
+        self.assertEqual(cfg["stale_minutes"], 45)
+
+    def test_the_shipped_vps_roles_are_valid_and_carwiz_only(self):
+        import json
+        here = Path(carwatch.__file__).resolve().parent
+        role = json.loads((here / "carwatch.vps.json").read_text())
+        self.assertEqual(role["sources"], ["carwiz"])
+        for name in ("carwatch.vps.json", "config.vps.json"):
+            self.assertTrue(json.loads((here / name).read_text())["check_hint"])
 
 
 if __name__ == "__main__":
