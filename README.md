@@ -146,3 +146,57 @@ Only want full rigs with the CPU you actually want:
 ```bash
 python3 test_dealwatch.py
 ```
+
+## carwatch: facelift Ioniq 5 on yad2 + carwiz
+
+Same box, same Telegram bot, different hunt: `carwatch.py` pings you when a
+facelifted Hyundai Ioniq 5 (mid-2024 on, 84 kWh, rear wiper) is listed for
+sale anywhere in Israel, on yad2 or carwiz.
+
+```bash
+python3 carwatch.py --dry-run --source carwiz   # judge what is listed now, change nothing
+./install-carwatch.sh                            # systemd --user timer, every 10 min
+systemctl --user start carwatch.service          # first poll: sends the "armed" digest
+journalctl --user -u carwatch.service -f
+```
+
+**Nothing is alerted from a search result.** Search pages lie: sellers file a
+2024 pre-facelift as a 2025, carwiz files every Ioniq (hybrid, 5, 6) under one
+model, and Claude reading a search page will happily hand you a car that sold
+last month. So every unseen listing gets its own page fetched at alert time,
+and the alert only fires if:
+
+1. the page is live (yad2: the ad's data is still served and `endsAt` has not
+   passed; carwiz: the post is still published), and
+2. the car's own numbers say facelift. Rated power is the cleanest tell both
+   sites print: 229 hp (RWD) / 325 hp (AWD) is the 84 kWh facelift motor, 217 /
+   305 is the old 72.6-77.4 kWh pack. carwiz also prints the battery size. A
+   2025 model year with none of that shown still alerts, marked **UNVERIFIED**;
+   a 2024 with a pre-facelift-only trim (Luxury, Prestige, Supreme) or the old
+   motor does not.
+
+The alert carries the evidence it used, e.g. `Checked: 229hp = 84 kWh
+facelift motor; seller text mentions rear wiper`, so you can see why it fired.
+
+The first run judges everything listed right now and sends one digest instead
+of a pile of alerts; after that only new ads ping. A listing is remembered
+once judged (alerted, rejected, or found dead); a fetch that failed is retried
+next poll.
+
+**yad2 needs a real Chrome.** yad2 sits behind Radware Bot Manager, which
+challenges plain HTTP, cookie replay, and headless Chrome alike; a windowed
+google-chrome driven by [patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright)
+passes. The installer runs it under Xvfb so no window ever appears:
+
+```bash
+sudo dnf install xorg-x11-server-Xvfb     # once; google-chrome must be installed too
+```
+
+Datacenter IPs are likely to fail the same wall, which is why this one runs
+on the laptop rather than the VPS. carwiz is plain HTML and needs none of it.
+
+State lives next to dealwatch's: `state/carwatch-seen.json`,
+`state/carwatch-hits.jsonl`, `state/carwatch-heartbeat.json`, and the Chrome
+profile in `state/chrome-profile/`. The watchdog timer warns over Telegram if
+no poll has succeeded in `stale_minutes` (45). Config overrides go in
+`carwatch.json` (`sources`, year range, yad2/carwiz ids).

@@ -13,19 +13,21 @@ from __future__ import annotations
 import argparse
 import html
 import json
-import os
 import re
 import secrets
 import shutil
 import subprocess
 import sys
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
+
+import state
+from notify import (money, notify_desktop, notify_ntfy, notify_telegram,
+                    telegram_creds)
+from state import load_beat, load_seen, record_poll, save_beat, save_seen
+from web import fetch
 
 ATOM = {"a": "http://www.w3.org/2005/Atom"}
 HOME = Path(__file__).resolve().parent
@@ -77,126 +79,16 @@ DEFAULT_CONFIG = {
     "heartbeat_hours": 0,
 }
 
-# How many matched posts the heartbeat carries: kept in the state file, and
-# shown in the message. Telegram caps a message at 4096 characters.
-RECENT_KEEP = 25
-RECENT_SHOW = 15
-
 
 # ---------------------------------------------------------------- config/state
 
 def load_config(path: Path) -> dict:
-    """DEFAULT_CONFIG, then config.json, then config.local.json.
-
-    The .local file is gitignored and is where anything private belongs --
-    the ntfy topic is a shared secret, so it must never reach a public repo.
-    """
-    cfg = json.loads(json.dumps(DEFAULT_CONFIG))
-    for layer in (path, path.with_name(path.stem + ".local" + path.suffix)):
-        if layer.exists():
-            for k, v in json.loads(layer.read_text()).items():
-                cfg[k] = v
-    return cfg
-
-
-def load_beat(path: Path) -> dict:
-    try:
-        return json.loads(path.read_text())
-    except (json.JSONDecodeError, OSError, FileNotFoundError):
-        return {}
-
-
-def save_beat(path: Path, beat: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(beat))
-    tmp.replace(path)
-
-
-def record_poll(path: Path, scanned: int, hits: int,
-                matches: "list[Match] | tuple" = ()) -> None:
-    """Stamp a successful poll, and keep what it found.
-
-    The heartbeat is only useful if it says *which* posts matched, so the
-    matches ride along in the state file until the next heartbeat ships
-    them. Capped: a burst of hits must not grow this file without bound.
-    """
-    beat = load_beat(path)
-    beat["last_ok"] = time.time()
-    beat["polls"] = beat.get("polls", 0) + 1
-    beat["hits"] = beat.get("hits", 0) + hits
-    beat["scanned"] = scanned
-    if matches:
-        recent = list(beat.get("recent", []))
-        recent.extend({"title": m.post.title, "link": m.post.link,
-                       "price": m.price, "hot": m.hot} for m in matches)
-        beat["recent"] = recent[-RECENT_KEEP:]
-    save_beat(path, beat)
-
-
-def format_recent(recent: list[dict], total: int) -> str:
-    """The links, newest first, for the heartbeat body."""
-    lines = []
-    for r in reversed(recent[-RECENT_SHOW:]):
-        price = f"${r['price']:,.0f}" if r.get("price") is not None else "price?"
-        flame = "HOT " if r.get("hot") else ""
-        lines.append(f"{flame}{price}  {r.get('title', '')}\n{r.get('link', '')}")
-    dropped = total - len(lines)
-    if dropped > 0:
-        lines.append(f"...and {dropped} more (see the log)")
-    return "\n\n".join(lines)
+    return state.load_config(path, DEFAULT_CONFIG)
 
 
 def watchdog(cfg: dict, beat_path: Path) -> int:
-    """Report a stopped poller, and confirm a working one once a day.
-
-    Runs from its own timer so it still speaks up when the poller itself is
-    the thing that is broken.
-    """
-    beat = load_beat(beat_path)
-    now = time.time()
-    last_ok = beat.get("last_ok", 0)
-    stale_after = float(cfg.get("stale_minutes", 30)) * 60
-
-    if not last_ok:
-        print("no successful poll recorded yet")
-        return 0
-
-    quiet = now - last_ok
-    if quiet > stale_after:
-        mins = int(quiet // 60)
-        last_warn = beat.get("last_warn", 0)
-        if now - last_warn > 3600:  # at most one warning an hour
-            notify_telegram(
-                cfg, "dealwatch has stopped polling",
-                f"No successful poll for {mins} minutes "
-                f"(expected one every few minutes).\n"
-                f"Check: systemctl --user status dealwatch.timer")
-            beat["last_warn"] = now
-            save_beat(beat_path, beat)
-        print(f"STALE: last successful poll {mins} minutes ago")
-        return 1
-
-    every = float(cfg.get("heartbeat_hours", 24)) * 3600
-    if every > 0 and now - beat.get("last_beat", 0) > every:
-        hours = int((now - beat.get("last_beat", now - every)) // 3600)
-        hits = beat.get("hits", 0)
-        recent = list(beat.get("recent", []))
-        body = (f"{beat.get('polls', 0)} polls in the last {hours}h, "
-                f"{hits} matching post(s). "
-                f"Watching r/{cfg['subreddit']} for 5090s.")
-        if recent:
-            body += "\n\n" + format_recent(recent, max(hits, len(recent)))
-        elif hits:
-            # counted before this version started keeping the links
-            body += "\n\nLinks were not recorded for these; see the log."
-        sent = notify_telegram(cfg, "dealwatch is alive", body)
-        beat.update(last_beat=now, polls=0, hits=0, recent=[])
-        save_beat(beat_path, beat)
-        print("heartbeat sent" if sent else "heartbeat skipped: no telegram channel")
-    else:
-        print(f"ok: last poll {int(quiet // 60)}m ago")
-    return 0
+    return state.watchdog(cfg, beat_path, name="dealwatch",
+                          label=f"r/{cfg['subreddit']} for 5090s")
 
 
 def validate_config(cfg: dict) -> None:
@@ -221,64 +113,7 @@ def validate_config(cfg: dict) -> None:
                 f"bad regex in bonus {rule['label']!r}: {rule['pattern']!r} ({e})") from e
 
 
-def load_seen(path: Path) -> list[str]:
-    """Post ids, oldest first. A list, not a set: the trim in save_seen
-    drops the oldest, and set iteration order would make that arbitrary."""
-    if not path.exists():
-        return []
-    try:
-        return list(json.loads(path.read_text()).get("seen", []))
-    except (json.JSONDecodeError, OSError):
-        return []
-
-
-def save_seen(path: Path, seen: list[str], keep: int = 3000) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps({"seen": seen[-keep:]}))
-    tmp.replace(path)
-
-
 # ------------------------------------------------------------------- fetching
-
-def fetch(url: str, user_agent: str, attempts: int = 3) -> str:
-    """GET the feed, honouring reddit's rate limit.
-
-    Anonymous RSS allows about one request per 60s window; a 429 carries
-    x-ratelimit-reset (seconds left in the window), so wait exactly that
-    long rather than guessing at a backoff curve.
-    """
-    last = None
-    for i in range(attempts):
-        if i:
-            time.sleep(_retry_delay(last))
-        req = urllib.request.Request(url, headers={
-            "User-Agent": user_agent,
-            "Accept": "application/atom+xml,application/xml;q=0.9,*/*;q=0.8",
-        })
-        try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                body = resp.read().decode("utf-8", "replace")
-            if body.strip():
-                return body
-            last = ("empty", 10)
-        except urllib.error.HTTPError as e:
-            if e.code not in (429, 500, 502, 503, 504):
-                raise
-            reset = e.headers.get("x-ratelimit-reset") or e.headers.get("retry-after")
-            try:
-                wait = min(90, int(float(reset)) + 3)
-            except (TypeError, ValueError):
-                wait = 30
-            last = (f"HTTP {e.code}", wait)
-        except (urllib.error.URLError, TimeoutError) as e:
-            last = (str(e), 15)
-    raise RuntimeError(f"fetch failed after {attempts} attempts: {last[0]}")
-
-
-def _retry_delay(last) -> int:
-    return last[1] if last else 15
-
 
 def feed_url(cfg: dict) -> str:
     return (f"https://www.reddit.com/r/{cfg['subreddit']}/new/.rss"
@@ -494,107 +329,16 @@ def evaluate(post: Post, cfg: dict) -> Match | None:
 
 # ------------------------------------------------------------------- alerting
 
-def notify_desktop(title: str, body: str, urgency: str = "normal") -> None:
-    env = dict(os.environ)
-    # systemd imports the session env once at install time; that snapshot goes
-    # stale across logout/reboot, so prefer the live per-user bus socket.
-    bus = Path(f"/run/user/{os.getuid()}/bus")
-    if bus.exists():
-        env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={bus}"
-    env.setdefault("DISPLAY", ":0")
-    try:
-        subprocess.run(
-            ["notify-send", "-u", urgency, "-t", "0", "-a", "dealwatch",
-             "-i", "video-display", title, body],
-            env=env, check=False, timeout=10,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
-
-
-def notify_ntfy(cfg: dict, title: str, body: str, link: str, hot: bool) -> None:
-    topic = cfg.get("ntfy_topic", "").strip()
-    if not topic:
-        return
-    url = f"{cfg['ntfy_server'].rstrip('/')}/{urllib.parse.quote(topic)}"
-    headers = {
-        "Title": title.encode("ascii", "ignore").decode() or "buildapcsales hit",
-        "Priority": "urgent" if hot else "high",
-        "Tags": "fire" if hot else "computer",
-        "Click": link,
-        "Actions": f"view, Open post, {link}",
-    }
-    req = urllib.request.Request(url, data=body.encode("utf-8"),
-                                 headers=headers, method="POST")
-    try:
-        urllib.request.urlopen(req, timeout=15).read()
-    except (urllib.error.URLError, TimeoutError) as e:
-        print(f"[warn] ntfy push failed: {e}", file=sys.stderr)
-
-
-def telegram_creds(cfg: dict) -> tuple[str, str] | None:
-    """Bot token + chat id from the environment, else the first env file
-    that carries both. Same file daytrader uses, so one setup covers both."""
-    token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-    chat = os.environ.get("TELEGRAM_CHAT_ID", "")
-    if token and chat:
-        return token, chat
-    for name in cfg.get("telegram_env_files", []):
-        path = Path(name).expanduser()
-        if not path.exists():
-            continue
-        found = {}
-        try:
-            for line in path.read_text().splitlines():
-                line = line.strip()
-                if line.startswith("#") or "=" not in line:
-                    continue
-                key, _, val = line.partition("=")
-                found[key.strip()] = val.strip().strip("'\"")
-        except OSError:
-            continue
-        if found.get("TELEGRAM_BOT_TOKEN") and found.get("TELEGRAM_CHAT_ID"):
-            return found["TELEGRAM_BOT_TOKEN"], found["TELEGRAM_CHAT_ID"]
-    return None
-
-
-def notify_telegram(cfg: dict, title: str, body: str) -> bool:
-    if not cfg.get("telegram", True):
-        return False
-    creds = telegram_creds(cfg)
-    if not creds:
-        return False
-    token, chat = creds
-    data = urllib.parse.urlencode({
-        "chat_id": chat,
-        # plain text, no parse_mode: deal titles are full of characters that
-        # would 400 the API as markdown
-        "text": f"{title}\n\n{body}",
-        "disable_web_page_preview": "false",
-    }).encode()
-    req = urllib.request.Request(
-        f"https://api.telegram.org/bot{token}/sendMessage", data=data)
-    try:
-        urllib.request.urlopen(req, timeout=15).read()
-        return True
-    except (urllib.error.URLError, TimeoutError) as e:
-        print(f"[warn] telegram send failed: {e}", file=sys.stderr)
-        return False
-
-
 def log_hit(path: Path, m: Match) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    rec = {
+    state.append_jsonl(path, {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "id": m.post.id, "title": m.post.title, "link": m.post.link,
         "price": m.price, "score": m.score, "hot": m.hot, "kind": m.kind,
-    }
-    with path.open("a") as f:
-        f.write(json.dumps(rec) + "\n")
+    })
 
 
 def alert(cfg: dict, m: Match, log_path: Path) -> None:
-    price = f"${m.price:,.0f}" if m.price is not None else "price?"
+    price = money(m.price)
     tags = " + ".join(m.reasons)
     flame = "HOT " if m.hot else ""
     head = f"{flame}5090 {m.kind.upper()} {price}"
@@ -675,7 +419,7 @@ def run_once(cfg: dict, state_path: Path, log_path: Path,
         hits += 1
         matched.append(m)
         if seed or first_run or dry:
-            price = f"${m.price:,.0f}" if m.price else "price?"
+            price = money(m.price)
             state = "seeded" if (seed or first_run) else "dry-run"
             print(f"[{state}] {price:>8}  {p.title}")
         else:
@@ -700,7 +444,8 @@ def run_once(cfg: dict, state_path: Path, log_path: Path,
                            + "; ".join(errors[:3]))
     if not dry:
         record_poll(state_path.with_name("heartbeat.json"), len(posts), hits,
-                    matched)
+                    [{"title": m.post.title, "link": m.post.link,
+                      "price": m.price, "hot": m.hot} for m in matched])
     return hits
 
 

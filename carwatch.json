@@ -1,0 +1,9 @@
+{
+  "_comment": "Overrides on top of DEFAULT_CONFIG in carwatch.py. Edit freely.",
+  "sources": ["yad2", "carwiz"],
+  "yad2_year_from": 2024,
+  "yad2_year_to": 2026,
+  "carwiz_year_from": 2024,
+  "carwiz_year_to": 2026,
+  "stale_minutes": 45
+}
